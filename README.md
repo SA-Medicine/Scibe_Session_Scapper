@@ -112,8 +112,10 @@ Once the tool finishes, all your exported data is neatly organized:
 
 ## ❓ FAQ & Troubleshooting
 
-* **Docker volume is in use / Conflict error:**
-  Always run the three commands in **Step 2**. The first two commands explicitly remove old containers and profiles to prevent conflicts.
+* **Docker container in use / Duplicate or Conflict error:**
+  If you see an error about a container already being in use or a duplicate, either manually delete the conflicting container from the Docker Desktop app, or forcefully remove them by running this command in your terminal:
+  `docker rm -f heidi_postgres heidi_backend heidi_dashboard`
+  Then, always run the three commands in **Step 2** to restart.
 * **The browser is stuck on the login page.**
   If automatic login fails, wait for the prompt to log in manually. Once logged in, the system will detect it and continue.
 * **I need to start over completely.**
