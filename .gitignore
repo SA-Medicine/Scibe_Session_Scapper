@@ -1,0 +1,13 @@
+.env
+**/.env
+.env.*
+node_modules/
+__pycache__/
+*.pyc
+exports/
+logs/
+checkpoints/
+screenshots/
+heidi_archive.db
+chrome_profile/
+docker_chrome_profile/
