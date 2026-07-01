@@ -1,0 +1,11 @@
+.env
+heidi_archive.db
+chrome_profile/
+cookies/
+logs/
+checkpoints/
+screenshots/
+exports/
+__pycache__/
+*.pyc
+.pytest_cache/

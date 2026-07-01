@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: heidi_postgres
+    environment:
+      POSTGRES_USER: heidi_user
+      POSTGRES_PASSWORD: heidi_pass
+      POSTGRES_DB: heidi_archive
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  dashboard:
+    build: 
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: heidi_dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: "postgresql://heidi_user:heidi_pass@postgres:5432/heidi_archive?schema=public"
+    volumes:
+      # Mount shared scraper logs so dashboard can stream them live via SSE
+      - scraper_logs:/scraper-logs:ro
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend/heidi_exporter
+      dockerfile: Dockerfile
+    container_name: heidi_backend
+    shm_size: '2gb'
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-heidi_user}:${POSTGRES_PASSWORD:-heidi_pass}@postgres:5432/${POSTGRES_DB:-heidi_archive}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HEIDI_EMAIL=${HEIDI_EMAIL}
+      - HEIDI_PASSWORD=${HEIDI_PASSWORD}
+      - HEADLESS=true
+    volumes:
+      - ./backend/heidi_exporter:/app
+      - docker_chrome_profile:/app/chrome_profile
+      - ./exports:/app/exports
+      # Write logs to shared volume so dashboard can read them
+      - scraper_logs:/app/logs
+
+volumes:
+  pgdata:
+  scraper_logs:
+  docker_chrome_profile:
