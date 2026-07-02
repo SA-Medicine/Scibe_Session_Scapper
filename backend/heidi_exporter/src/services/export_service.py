@@ -9,7 +9,7 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from src.database.models import ArtifactRecord, AuditLogRecord, SessionRecord, NoteRecord, TranscriptRecord
+from src.database.models import Base, ArtifactRecord, AuditLogRecord, SessionRecord, NoteRecord, TranscriptRecord
 
 
 class ExportService:
@@ -51,20 +51,29 @@ class ExportService:
             json.dump(payload, handle, indent=2, ensure_ascii=False, default=self._json_default)
 
     def export_sql_dump(self) -> None:
+        """Dump the ENTIRE database (every table) as portable INSERT statements.
+
+        Iterates all mapped tables so the export is a complete backup, not just the
+        core session tables. Each table is wrapped in try/except so one problematic
+        table (e.g. vector embeddings) can't abort the whole dump.
+        """
         path = self.exports_dir / "heidi_dump.sql"
-        ordered_tables = [SessionRecord, TranscriptRecord, NoteRecord, ArtifactRecord, AuditLogRecord]
         with path.open("w", encoding="utf-8") as handle:
-            handle.write("-- Heidi Health Scribe archival SQL dump\n")
-            for model in ordered_tables:
-                table = model.__table__
-                rows = self.db.execute(select(model)).scalars().all()
+            handle.write("-- Heidi Health Scribe archival SQL dump (full database)\n")
+            for table in Base.metadata.sorted_tables:
+                try:
+                    rows = self.db.execute(table.select()).fetchall()
+                except Exception as exc:  # pragma: no cover - defensive
+                    handle.write(f"\n-- {table.name}: skipped ({exc})\n")
+                    continue
                 if not rows:
                     continue
-                handle.write(f"\n-- {table.name}\n")
                 columns = [column.name for column in table.columns]
                 column_sql = ", ".join(columns)
+                handle.write(f"\n-- {table.name} ({len(rows)} rows)\n")
                 for row in rows:
-                    values = ", ".join(self._sql_literal(getattr(row, column)) for column in columns)
+                    mapping = row._mapping
+                    values = ", ".join(self._sql_literal(mapping[column]) for column in columns)
                     handle.write(f"INSERT INTO {table.name} ({column_sql}) VALUES ({values});\n")
 
     def export_audit_report(self) -> None:

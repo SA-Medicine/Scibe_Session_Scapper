@@ -116,6 +116,9 @@ class SessionDiscovery:
         self.scroll_poll_interval_seconds = 0.2
         self.cursor_fallback_stable_rounds = 4
         self.zero_yield_scroll_abort_threshold = 10
+        # URL prefix (e.g. ".../sessions/") used to open a session directly by id
+        # when its row link was not captured during discovery. Set by ArchiveService.
+        self.url_prefix: str | None = None
 
     def discover_all(self) -> list[SessionMetadata]:
         self.navigator.open_past_sessions()
@@ -127,7 +130,7 @@ class SessionDiscovery:
             before_count = len(discovered)
             candidates = self._candidate_elements()
             for element in candidates:
-                metadata = self._metadata_from_element(element)
+                metadata = self._metadata_from_element(element, fast=True)
                 if metadata is None:
                     continue
                 if metadata.heidi_session_id not in discovered:
@@ -338,9 +341,28 @@ class SessionDiscovery:
         # Dismiss any modal overlays (e.g. Heidi upgrade dialog) before navigating.
         # Radix fixed backdrops with pointer-events:auto intercept all clicks if left open.
         dismiss_toasts(self.driver)
-        if metadata.source_url:
-            self.navigator.open_session_url(metadata.source_url)
-            return metadata
+
+        # ── Fast path: open the session directly by URL (no scrolling) ──────────
+        # Prefer the URL captured during a previous open; otherwise construct one
+        # from the session id using the learned URL prefix. A wrong/stale URL is
+        # self-correcting: open_session_url times out, we catch it, and fall back
+        # to the scroll-to-find path below.
+        direct_url = metadata.source_url or self._construct_session_url(metadata)
+        if direct_url:
+            try:
+                self.navigator.open_session_url(direct_url)
+                if metadata.source_url != direct_url:
+                    metadata = metadata.model_copy(update={"source_url": direct_url})
+                    self.repository.upsert_session_metadata(metadata)
+                    self.repository.db.commit()
+                return metadata
+            except Exception as exc:
+                self.logger.warning(
+                    "[WARNING] Direct URL open failed for %s (%s) — falling back to scroll-to-find",
+                    metadata.heidi_session_id, type(exc).__name__,
+                )
+
+        # ── Slow path (fallback): scroll the Past-sessions list to find the row ─
         self.navigator.open_past_sessions()
         self._reset_session_list()
         for _ in range(60):
@@ -367,6 +389,19 @@ class SessionDiscovery:
             time.sleep(0.4)
         title = metadata.session_title or metadata.patient_name or metadata.heidi_session_id
         raise TimeoutException(f"Could not find session row in Past list: {title}")
+
+    def _construct_session_url(self, metadata: SessionMetadata) -> str | None:
+        """Best-effort direct URL for a session that has no captured link yet.
+
+        Combines the learned URL prefix (e.g. '.../sessions/') with the real
+        session id. Returns None for synthetic 'text-' ids (no real id to build a
+        URL from) or when no prefix has been learned. The caller validates the URL
+        by loading it and falls back to scrolling if it doesn't resolve.
+        """
+        sid = metadata.heidi_session_id
+        if not sid or sid.startswith("text-") or not self.url_prefix:
+            return None
+        return f"{self.url_prefix}{sid}"
 
     def _candidate_elements(self) -> list[WebElement]:
         elements: list[WebElement] = []
@@ -403,7 +438,7 @@ class SessionDiscovery:
             elements.append(element)
         return elements
 
-    def _metadata_from_element(self, element: WebElement) -> SessionMetadata | None:
+    def _metadata_from_element(self, element: WebElement, fast: bool = False) -> SessionMetadata | None:
         try:
             text = element.text.strip()
             href = element.get_attribute("href")
@@ -421,7 +456,11 @@ class SessionDiscovery:
 
         try:
             source_url = href or self._nearest_link(element)
-            nearest_date = self._nearest_date_header(element)
+            # The nearest-date DOM scan walks every div/span/p on the page and is
+            # the most expensive per-row call. Skip it during the bulk discovery
+            # scroll (fast=True); the exact date is filled in later from the open
+            # session detail page during extraction.
+            nearest_date = None if fast else self._nearest_date_header(element)
         except Exception:
             source_url = href
             nearest_date = None
@@ -738,7 +777,6 @@ class SessionDiscovery:
                 if (dateRe.test(t)) results.push(t);
             }
         }
-        // Also check <time datetime="..."> attributes
         for (const el of document.querySelectorAll('time[datetime]')) {
             const dt = el.getAttribute('datetime');
             if (dt) results.push(dt);

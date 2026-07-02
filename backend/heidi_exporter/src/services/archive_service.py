@@ -70,133 +70,89 @@ class ArchiveService:
             self.process_one(ordinal, metadata)
 
     def process_sessions_batched(self, batch_size: int = 10) -> None:
-        """Process all sessions in rolling batches of `batch_size`.
+        """Archive every session using a decoupled discover-once / extract-by-URL design.
 
-        Uses the database as the source of truth for which sessions are already done.
-        On crash/restart, reads `last_session_id` from checkpoint and passes it to
-        `discover_batch()` as a cursor so the scroll resumes from the last position
-        instead of rescanning from the top.
+        Phase A -- Discovery (runs once, ever):
+            Scroll the Past-sessions list a single time from top to bottom and
+            persist every session's metadata (and link, when present) to the
+            database. A 'discovery_complete' flag in the checkpoint records that
+            this pass finished, so it is never repeated on later runs/restarts.
+
+        Phase B -- Extraction (DB-driven, no scrolling):
+            Repeatedly pull the next pending sessions straight from the database
+            and open each one directly by URL. Because the work queue lives in the
+            DB, resuming after a crash or a planned browser restart is just another
+            query -- the scraper never re-scrolls the list to find its place. This
+            replaces the old O(N^2) "re-scroll the whole completed prefix on every
+            restart" behaviour with O(N).
 
         Raises:
             PlannedRestartSignal: After `restart_every` sessions to trigger a clean
                                   browser restart in main.py (prevents memory leaks).
             BrowserCrashedError:  On unrecoverable Chrome crashes.
         """
-        self.discovery.navigator.open_past_sessions()
-        self.discovery._reset_session_list()
+        # Teach the discovery helper how to build direct session URLs for rows
+        # whose link was not captured, using a pattern learned from the DB.
+        self.discovery.url_prefix = self.repository.get_url_prefix_template()
+        if self.discovery.url_prefix:
+            self.logger.info("[INFO] Learned session URL prefix: %s", self.discovery.url_prefix)
 
-        global_ordinal = 0
-        total_batches = 0
-        sessions_this_cycle = 0  # resets only on planned restart
-        retry_policy = RetryPolicy(max_attempts=2, base_delay=10.0, backoff_factor=1.0)
-        # exhausted_ids persists for the ENTIRE run so sessions that fail all retries
-        # are never re-discovered and retried in subsequent batches of the same run.
-        exhausted_ids: set[str] = set()
-
-        # Load resume cursor from checkpoint — None on fresh runs
-        cursor_session_id: str | None = self.checkpoint.last_session_id()
-        if cursor_session_id:
-            # Stale-cursor guard: if the DB is empty (e.g. user cleared it manually),
-            # the cursor points to a session that no longer exists in any context.
-            # Scrolling for it would loop forever. Detect this and start fresh.
-            _precheck_completed = self.repository.get_successfully_processed_ids()
-            if not _precheck_completed:
-                self.logger.warning(
-                    "[WARNING] Checkpoint has cursor '%s' but database has 0 completed sessions. "
-                    "DB was likely cleared — discarding stale cursor and starting from the beginning.",
-                    cursor_session_id,
-                )
-                cursor_session_id = None
-                self.checkpoint.update_session_pointer(
-                    session_id=None,  # type: ignore[arg-type]
-                    session_url=None,
-                    ordinal=0,
-                )
-            elif cursor_session_id not in _precheck_completed:
-                self.logger.warning(
-                    "[WARNING] Checkpoint cursor '%s' is not present in the durable completed-session set. "
-                    "Discarding stale cursor and resuming from the beginning with DB-backed skip state.",
-                    cursor_session_id,
-                )
-                cursor_session_id = None
-                self.checkpoint.update_session_pointer(
-                    session_id=None,  # type: ignore[arg-type]
-                    session_url=None,
-                    ordinal=0,
-                )
-            else:
-                self.logger.info(
-                    "[INFO] Resume cursor loaded: '%s' — will skip to this session before collecting",
-                    cursor_session_id,
-                )
-
-        # Move initial navigation out of the batch loop so we don't reset the list 
-        # to the top on every 10 sessions.
-        try:
-            self.discovery.navigator.open_past_sessions()
-            self.discovery._reset_session_list()
-        except Exception as nav_exc:
-            self.logger.error(
-                "[ERROR] Initial navigation failed: %s. Waiting 10s before retry...",
-                str(nav_exc).split("\n")[0],
+        # -- Phase A: one-time discovery ---------------------------------------
+        if not self.checkpoint.is_discovery_complete():
+            self.logger.info(
+                "[INFO] === DISCOVERY PHASE: scrolling the full session list once ==="
             )
-            time.sleep(10)
             try:
-                self.discovery.navigator.open_past_sessions()
-                self.discovery._reset_session_list()
-            except Exception as nav_exc2:
-                self.logger.error(
-                    "[ERROR] Initial navigation failed again after retry: %s. Aborting.",
-                    str(nav_exc2).split("\n")[0],
+                discovered = self.discovery.discover_all()
+                self.checkpoint.mark_discovery_complete()
+                # Re-learn the prefix now that discovery may have captured links.
+                self.discovery.url_prefix = (
+                    self.discovery.url_prefix or self.repository.get_url_prefix_template()
                 )
-                return
+                self.logger.info(
+                    "[INFO] Discovery complete -- %d sessions catalogued in the database.",
+                    len(discovered),
+                )
+            except Exception as disc_exc:
+                # Do NOT mark complete on failure; the next run resumes discovery.
+                self.logger.error(
+                    "[ERROR] Discovery pass failed: %s. Discovery will resume on next run.",
+                    str(disc_exc).split(chr(10))[0],
+                )
+                raise
+        else:
+            self.logger.info(
+                "[INFO] Discovery already complete -- going straight to extraction."
+            )
+
+        # -- Phase B: DB-driven extraction -------------------------------------
+        # Continue the ordinal counter across restarts so screenshot folders and
+        # zip filenames never collide with those from earlier browser cycles.
+        global_ordinal = self.checkpoint.load().get("last_processed_ordinal", 0) or 0
+        sessions_this_cycle = 0  # resets only on planned restart
+        total_batches = 0
+        retry_policy = RetryPolicy(max_attempts=2, base_delay=10.0, backoff_factor=1.0)
+        # Sessions that fail every retry this run -- never re-queued until next run.
+        exhausted_ids: set[str] = set()
 
         while True:
             completed_ids = self.repository.get_successfully_processed_ids()
+            skip_ids = completed_ids | exhausted_ids
+            batch = self.repository.get_pending_sessions(exclude_ids=skip_ids, limit=batch_size)
 
             self.logger.info(
-                "[INFO] Sessions completed so far: %d. Looking for next batch of %d...",
-                len(completed_ids),
-                batch_size,
+                "[INFO] Completed so far: %d. Pulled %d pending session(s) from the DB queue.",
+                len(completed_ids), len(batch),
             )
-
-            # Re-open past sessions for the batch (process_one navigates away),
-            # but DO NOT reset the list. We will restore scroll position inside discover_batch.
-            try:
-                self.discovery.navigator.open_past_sessions()
-            except Exception as nav_exc:
-                self.logger.error(
-                    "[ERROR] Re-navigation failed: %s. Waiting 10s before retry...",
-                    str(nav_exc).split("\n")[0],
-                )
-                time.sleep(10)
-                try:
-                    self.discovery.navigator.open_past_sessions()
-                except Exception as nav_exc2:
-                    self.logger.error(
-                        "[ERROR] Re-navigation failed again after retry: %s. Giving up this iteration.",
-                        str(nav_exc2).split("\n")[0],
-                    )
-                    break
-
-            skip_ids = completed_ids | exhausted_ids
-            batch = self.discovery.discover_batch(
-                batch_size,
-                skip_ids,
-                cursor_session_id=cursor_session_id,
-            )
-            # After first batch, clear the cursor — subsequent batches scroll forward naturally
-            cursor_session_id = None
 
             if not batch:
-                self.logger.info("[INFO] No new sessions found. Archival complete.")
+                self.logger.info("[INFO] No pending sessions left. Archival complete.")
                 break
 
             total_batches += 1
             self.logger.info(
-                "[INFO] === BATCH %d: processing %d sessions ===",
-                total_batches,
-                len(batch),
+                "[INFO] === BATCH %d: processing %d session(s) directly by URL ===",
+                total_batches, len(batch),
             )
 
             for metadata in batch:
@@ -212,10 +168,13 @@ class ArchiveService:
 
                     if success:
                         sessions_this_cycle += 1
-                        
+
                         # --- Periodic Export & Anonymization ---
                         if global_ordinal > 0 and global_ordinal % 100 == 0:
-                            self.logger.info("[INFO] Reached %d sessions. Triggering periodic export and anonymization...", global_ordinal)
+                            self.logger.info(
+                                "[INFO] Reached %d sessions. Triggering periodic export and anonymization...",
+                                global_ordinal,
+                            )
                             try:
                                 from src.services.export_service import ExportService
                                 from src.services.anonymize_service import AnonymizeService
@@ -224,12 +183,12 @@ class ArchiveService:
                                 self.logger.info("[INFO] Periodic export and anonymization complete.")
                             except Exception as e:
                                 self.logger.error("[ERROR] Periodic export/anonymization failed: %s", e)
-                                
-                        break  # success — move to next session
+
+                        break  # success -- move to next session
                     else:
                         if retry_policy.exhausted(sid):
                             self.logger.warning(
-                                "[WARNING] Session %s exhausted all %d retries — skipping permanently this run",
+                                "[WARNING] Session %s exhausted all %d retries -- skipping permanently this run",
                                 sid, retry_policy.max_attempts,
                             )
                             exhausted_ids.add(sid)
@@ -240,10 +199,10 @@ class ArchiveService:
                             )
                         global_ordinal -= 1  # revert ordinal if failed
 
-                # Planned browser restart check
+                # Planned browser restart check (memory hygiene on long runs)
                 if sessions_this_cycle >= self.restart_every:
                     self.logger.info(
-                        "[INFO] Planned browser restart after %d sessions — raising PlannedRestartSignal",
+                        "[INFO] Planned browser restart after %d sessions -- raising PlannedRestartSignal",
                         sessions_this_cycle,
                     )
                     raise PlannedRestartSignal(

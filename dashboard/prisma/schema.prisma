@@ -1,0 +1,186 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  email      String   @unique
+  created_at DateTime @default(now())
+
+  @@map("users")
+}
+
+model Patient {
+  id            Int      @id @default(autoincrement())
+  patient_name  String    // Encrypted string mapped as String
+  first_seen    DateTime @default(now())
+  last_seen     DateTime @default(now())
+  visit_count   Int      @default(1)
+  metadata_json Json?
+  created_at    DateTime @default(now())
+
+  sessions Session[]
+
+  @@map("patients")
+}
+
+model Session {
+  id                  Int       @id @default(autoincrement())
+  heidi_session_id    String    @unique
+  patient_id          Int?
+  patient_name_fallback String?  // Encrypted string mapped as String
+  subtitle            String?
+  session_title       String?
+  session_date        DateTime? @db.Date
+  session_time        DateTime? @db.Time
+  language            String?
+  duration            String?
+  internal_identifier String?
+  source_url          String?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+
+  patient           Patient?            @relation(fields: [patient_id], references: [id])
+  transcript        Transcript?
+  note              Note?
+  artifacts         Artifact[]
+  screenshots       Screenshot[]
+  audits            AuditLog[]
+  ai_embeddings     AiEmbedding[]
+  tags              SessionTag[]
+
+  @@map("sessions")
+}
+
+model Transcript {
+  id         Int      @id @default(autoincrement())
+  session_id Int      @unique
+  raw_text   String?   // Encrypted
+  clean_text String?   // Encrypted
+  word_count Int?
+  sha256     String
+  created_at DateTime @default(now())
+
+  session Session @relation(fields: [session_id], references: [id])
+
+  @@map("transcripts")
+}
+
+model Note {
+  id         Int      @id @default(autoincrement())
+  session_id Int      @unique
+  soap_note  String?   // Encrypted
+  assessment String?   // Encrypted
+  plan       String?   // Encrypted
+  summary    String?   // Encrypted
+  hash       String
+  created_at DateTime @default(now())
+
+  session Session @relation(fields: [session_id], references: [id])
+
+  @@map("notes")
+}
+
+model Artifact {
+  id                Int      @id @default(autoincrement())
+  session_id        Int
+  type              String
+  raw_html          String?
+  dom_json          Json?
+  clipboard_capture String?
+  dom_text          String?
+  rendered_text     String?
+  ocr_text          String?
+  copy_button_text  String?
+  react_state_text  String?
+  created_at        DateTime @default(now())
+
+  session Session @relation(fields: [session_id], references: [id])
+
+  @@map("artifacts")
+}
+
+model Screenshot {
+  id         Int      @id @default(autoincrement())
+  session_id Int
+  file_path  String
+  page_type  String?
+  created_at DateTime @default(now())
+
+  session Session @relation(fields: [session_id], references: [id])
+
+  @@map("screenshots")
+}
+
+model AuditLog {
+  id                Int       @id @default(autoincrement())
+  session_id        Int?
+  status            String
+  validation_status String?
+  retries_used      Int       @default(0)
+  error_message     String?
+  started_at        DateTime  @default(now())
+  completed_at      DateTime?
+
+  session Session? @relation(fields: [session_id], references: [id])
+
+  @@map("audit_logs")
+}
+
+model FailedExtraction {
+  id             Int      @id @default(autoincrement())
+  session_id     String
+  failure_reason String
+  retry_count    Int      @default(0)
+  last_attempt   DateTime @default(now()) @updatedAt
+
+  @@map("failed_extractions")
+}
+
+model AiEmbedding {
+  id          Int      @id @default(autoincrement())
+  session_id  Int
+  entity_type String?
+  // embedding   Unsupported("vector(3072)")?
+  created_at  DateTime @default(now())
+
+  session Session @relation(fields: [session_id], references: [id])
+
+  @@map("ai_embeddings")
+}
+
+model Tag {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  created_at DateTime @default(now())
+
+  sessions SessionTag[]
+
+  @@map("tags")
+}
+
+model SessionTag {
+  session_id Int
+  tag_id     Int
+
+  session Session @relation(fields: [session_id], references: [id])
+  tag     Tag     @relation(fields: [tag_id], references: [id])
+
+  @@id([session_id, tag_id])
+  @@map("session_tags")
+}
+
+model Export {
+  id          Int      @id @default(autoincrement())
+  export_type String
+  file_path   String
+  status      String   @default("pending")
+  created_at  DateTime @default(now())
+
+  @@map("exports")
+}

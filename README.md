@@ -55,9 +55,11 @@ In your VS Code terminal, run the following commands to clear out any old data a
 
 ```powershell
 docker-compose rm -svf backend
-docker volume rm heidi_session_archival_system_docker_chrome_profile
+docker volume rm heidi_session_archival_system_docker_chrome_profile 2>$null
 docker-compose up --build
 ```
+
+> ℹ️ On your **first run** these cleanup lines have nothing to remove yet, so you may see `No stopped containers`. That is expected and harmless — the `2>$null` hides the "no such volume" message, and the build continues normally.
 
 - Watch the terminal. The tool will begin setting up the database, dashboard, and the headless browser.
 - Once running, you can visit **`http://localhost:3000`** in your browser to view the Dashboard and live logs!

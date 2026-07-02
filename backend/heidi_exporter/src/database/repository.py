@@ -162,12 +162,8 @@ class HeidiRepository:
     def get_successfully_processed_ids(self) -> set[str]:
         """Return the set of heidi_session_ids that are definitively done.
 
-        Includes both 'success' and 'duplicate' audit statuses:
-        - 'success'   — session was fully extracted and validated.
-        - 'duplicate' — session content matches an already-stored session; no
-                         need to process it again on future runs.
-
-        Any session whose ID is in this set will be skipped by discover_batch.
+        Includes both 'success' and 'duplicate' audit statuses.
+        Any session whose ID is in this set will be skipped by the extractor.
         """
         rows = self.db.execute(
             select(SessionRecord.heidi_session_id)
@@ -175,3 +171,58 @@ class HeidiRepository:
             .where(AuditLogRecord.status.in_(["success", "duplicate"]))
         ).scalars().all()
         return set(rows)
+
+    # ── DB-driven extraction queue ────────────────────────────────────────────
+
+    def get_pending_sessions(
+        self,
+        exclude_ids: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[SessionMetadata]:
+        """Return sessions discovered but not yet completed.
+
+        Source of truth for the extraction loop once the one-time discovery scroll
+        has finished: the extractor pulls the next pending sessions straight from
+        the database and opens each directly by URL, so it never has to re-scroll
+        the list to find where it left off.
+        """
+        exclude_ids = exclude_ids or set()
+        stmt = (
+            select(SessionRecord)
+            .order_by(SessionRecord.session_date.desc().nullslast(), SessionRecord.id.asc())
+        )
+        pending: list[SessionMetadata] = []
+        for record in self.db.execute(stmt).scalars():
+            if record.heidi_session_id in exclude_ids:
+                continue
+            pending.append(
+                SessionMetadata(
+                    heidi_session_id=record.heidi_session_id,
+                    patient_name=record.patient_name_fallback,
+                    subtitle=record.subtitle,
+                    session_title=record.session_title,
+                    session_date=record.session_date,
+                    session_time=record.session_time,
+                    language=record.language,
+                    duration=record.duration,
+                    internal_identifier=record.internal_identifier,
+                    source_url=record.source_url,
+                )
+            )
+            if limit is not None and len(pending) >= limit:
+                break
+        return pending
+
+    def get_url_prefix_template(self) -> str | None:
+        """Return a URL prefix learned from any captured source_url.
+
+        The prefix is everything up to the trailing session id, e.g.
+        'https://scribe.heidihealth.com/sessions/'. Returns None if no session has
+        a usable URL yet.
+        """
+        url = self.db.scalar(
+            select(SessionRecord.source_url).where(SessionRecord.source_url.isnot(None)).limit(1)
+        )
+        if not url or "/" not in url:
+            return None
+        return url.rsplit("/", 1)[0] + "/"
