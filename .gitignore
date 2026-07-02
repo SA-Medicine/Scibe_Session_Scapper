@@ -4,7 +4,8 @@
 node_modules/
 __pycache__/
 *.pyc
-exports/
+exports/*
+!exports/.gitkeep
 logs/
 checkpoints/
 screenshots/
