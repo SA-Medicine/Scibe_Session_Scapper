@@ -98,7 +98,20 @@ class ArchiveService:
             self.logger.info("[INFO] Learned session URL prefix: %s", self.discovery.url_prefix)
 
         # -- Phase A: one-time discovery ---------------------------------------
-        if not self.checkpoint.is_discovery_complete():
+        needs_discovery = not self.checkpoint.is_discovery_complete()
+        if not needs_discovery and self.repository.count_sessions() == 0:
+            # Self-heal: the checkpoint says discovery finished, but the database
+            # is empty. This happens when checkpoint.json travels to a fresh
+            # machine/volume (e.g. via a synced project folder) while the database
+            # starts blank. Without this guard the run would skip discovery and
+            # immediately report "Archival complete" having scraped nothing.
+            self.logger.warning(
+                "[WARNING] discovery_complete=true but the database has 0 sessions -- "
+                "stale flag (fresh or reset DB). Re-running discovery from scratch."
+            )
+            needs_discovery = True
+
+        if needs_discovery:
             self.logger.info(
                 "[INFO] === DISCOVERY PHASE: scrolling the full session list once ==="
             )

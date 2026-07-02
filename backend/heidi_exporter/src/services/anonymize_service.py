@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -23,6 +24,10 @@ class AnonymizeService:
         self._patient_map: dict[str, str] = {}
 
         # --- Setup Presidio ---
+        # Presidio logs a WARNING for every non-English (es/it/pl) recognizer it
+        # skips while loading its built-in library. Those are harmless noise for
+        # our English-only pipeline, so quiet them to ERROR.
+        logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
         self.analyzer = AnalyzerEngine()
         self.anonymizer = AnonymizerEngine()
 

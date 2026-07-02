@@ -174,6 +174,10 @@ class HeidiRepository:
 
     # ── DB-driven extraction queue ────────────────────────────────────────────
 
+    def count_sessions(self) -> int:
+        """Total number of discovered sessions currently in the database."""
+        return int(self.db.scalar(select(func.count(SessionRecord.id))) or 0)
+
     def get_pending_sessions(
         self,
         exclude_ids: set[str] | None = None,
