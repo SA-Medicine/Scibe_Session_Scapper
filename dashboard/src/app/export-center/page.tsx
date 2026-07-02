@@ -28,6 +28,7 @@ function humanSize(bytes: number): string {
 export default function ExportCenter() {
   const [files, setFiles] = useState<ExportFile[]>([]);
   const [available, setAvailable] = useState(true);
+  const [tried, setTried] = useState<{ path: string; error: string }[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -36,6 +37,7 @@ export default function ExportCenter() {
       .then((d) => {
         setFiles(d.files || []);
         setAvailable(d.available !== false);
+        setTried(d.tried || []);
       })
       .catch(() => setAvailable(false))
       .finally(() => setLoading(false));
@@ -56,9 +58,25 @@ export default function ExportCenter() {
       {loading && <p className="text-sm text-[var(--color-text-muted)]">Loading available exports…</p>}
 
       {!loading && !available && (
-        <div className="p-4 border border-amber-500/30 rounded-lg bg-amber-500/10 text-sm">
-          No exports folder is mounted yet. Run the scraper (or <code>--export-only</code>) to generate
-          exports; they will appear here automatically.
+        <div className="p-4 border border-amber-500/30 rounded-lg bg-amber-500/10 text-sm space-y-2">
+          <p className="font-medium">The dashboard can&apos;t see the exports folder.</p>
+          <p className="text-[var(--color-text-secondary)]">
+            The volume is defined in <code>docker-compose.yml</code>, but a newly-added mount only takes
+            effect on a fresh container. Recreate the dashboard:
+          </p>
+          <pre className="text-xs bg-[var(--color-surface-3)] p-2 rounded overflow-x-auto">docker-compose up -d --build --force-recreate dashboard</pre>
+          {tried.length > 0 && (
+            <div className="text-xs text-[var(--color-text-muted)]">
+              <p className="mb-1">Paths checked:</p>
+              <ul className="list-disc pl-5 space-y-0.5">
+                {tried.map((t) => (
+                  <li key={t.path}>
+                    <code>{t.path}</code> — {t.error === 'ENOENT' ? 'not mounted' : t.error === 'EACCES' ? 'permission denied' : t.error}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
